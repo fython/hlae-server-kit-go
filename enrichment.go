@@ -15,12 +15,12 @@ type Enrichment interface {
 	GetEnrichment() []string
 }
 
-// UserIDEnrichment contains User informations with XUID/Eyeorigins(Cordinates)/EyeAngles(Cordinates)
+// UserIDEnrichment contains User informations with XUID/Eyeorigins(Coordinates)/EyeAngles(Coordinates)
 type UserIDEnrichment struct {
 	enrichments []string
 	XUID        *big.Int
-	EyeOrigin   Cordinates
-	EyeAngles   Cordinates
+	EyeOrigin   Coordinates
+	EyeAngles   Coordinates
 	KeyValue    string
 }
 
@@ -32,8 +32,8 @@ func newUserIDEnrichment() *UserIDEnrichment {
 			"useridWithEyeAngles",
 		},
 		XUID:      &big.Int{},
-		EyeOrigin: Cordinates{},
-		EyeAngles: Cordinates{},
+		EyeOrigin: Coordinates{},
+		EyeAngles: Coordinates{},
 		KeyValue:  "",
 	}
 }
@@ -85,8 +85,8 @@ func (u *UserIDEnrichment) GetEnrichment() []string {
 // EntityNumEnrichment containns Entity's Origin/Angles.
 type EntityNumEnrichment struct {
 	enrichments []string
-	Origin      Cordinates
-	Angles      Cordinates
+	Origin      Coordinates
+	Angles      Coordinates
 	KeyValue    string
 }
 
@@ -96,8 +96,8 @@ func newEntityNumEnrichment() *EntityNumEnrichment {
 			"entnumWithOrigin",
 			"entnumWithAngles",
 		},
-		Origin:   Cordinates{},
-		Angles:   Cordinates{},
+		Origin:   Coordinates{},
+		Angles:   Coordinates{},
 		KeyValue: "",
 	}
 }

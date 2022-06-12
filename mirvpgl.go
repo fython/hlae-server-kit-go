@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"io"
-	"log"
+	"net/http"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"gopkg.in/olahol/melody.v1"
 )
 
@@ -16,169 +17,177 @@ const (
 	mirvPglVersion = 2
 )
 
-var (
-	nullstr = byte('\x00')
-)
+type HLAEServerArguments struct {
+	Logger *zap.Logger
+}
 
-// CamData Camera datas
-type CamData struct {
-	Time float32
-	XPos float32
-	YPos float32
-	ZPos float32
-	XRot float32
-	YRot float32
-	Zrot float32
-	Fov  float32
+// HLAEServer Main struct
+type HLAEServer struct {
+	logger          *zap.Logger
+	melody          *melody.Melody
+	sessions        []HLAESession
+	eventSerializer *gameEventUnserializer
+
+	handlers          []func(string)
+	camHandlers       []func(*CamData)
+	eventHandlers     []func(*GameEventData)
+	levelInitHandlers []func(string)
 }
 
 // New Get new instance of HLAEServer
-func New(host, path string) (*HLAEServer, error) {
-	if host == "" || path == "" {
-		return nil, fmt.Errorf("Empty path or host")
-	}
-	srv := &HLAEServer{
-		host:     host,
-		path:     path,
-		melody:   nil,
-		sessions: make([]*melody.Session, 0),
-		engine:   nil,
-	}
-	srv.melody = melody.New()
-	srv.eventSerializer = newGameEventUnserializer(enrichments)
-
-	srv.melody.HandleConnect(func(s *melody.Session) {
-
-	})
-	srv.melody.HandleMessageBinary(func(s *melody.Session, data []byte) {
-		buf := bytes.NewBuffer(data)
-		cmd, err := buf.ReadString(nullstr)
+func New(args HLAEServerArguments) (srv *HLAEServer, err error) {
+	if args.Logger == nil {
+		args.Logger, err = zap.NewDevelopmentConfig().Build()
 		if err != nil {
-			if err == io.EOF {
-				fmt.Println("EOF.")
-			} else {
-				fmt.Println("Failed to read string from buffer : ", err)
-			}
+			err = fmt.Errorf("failed to init logger: %w", err)
 			return
 		}
-		cmd = strings.ReplaceAll(cmd, string(nullstr), "")
-		fmt.Println("Received cmd:", cmd)
-		switch cmd {
-		case "hello":
-			fmt.Println("HLAE Client connection established...")
-			var version uint32
-			if err := binary.Read(buf, binary.LittleEndian, &version); err != nil {
-				fmt.Println("Failed to read version message buffer : ", err)
-				return
-			}
-			fmt.Println("Current Version :", version)
-			if version != mirvPglVersion {
-				return
-			}
+	}
+	srv = &HLAEServer{
+		logger:   args.Logger,
+		melody:   melody.New(),
+		sessions: make([]HLAESession, 0),
+	}
+	srv.eventSerializer = newGameEventUnserializer(enrichments)
 
-			srv.TransBegin()
-			s.WriteBinary(commandToByteSlice("mirv_pgl events enrich clientTime 1"))
-			for eventName, v := range enrichments {
-				for enrichName, e := range v {
-					for _, er := range e.GetEnrichment() {
-						cmd := fmt.Sprintf(`mirv_pgl events enrich eventProperty "%s" "%s" "%s"`, er, eventName, enrichName)
-						s.WriteBinary(commandToByteSlice(cmd))
-					}
-				}
-			}
-			s.WriteBinary(commandToByteSlice("mirv_pgl events enabled 1"))
-			s.WriteBinary(commandToByteSlice("mirv_pgl events useCache 1"))
-			srv.TransEnd()
-
-			srv.handleRequest(cmd)
-		case "dataStop":
-			fmt.Println("HLAE Client stopped sending data...")
-			srv.handleRequest(cmd)
-		case "dataStart":
-			fmt.Println("HLAE Client started sending data...")
-			srv.handleRequest(cmd)
-		case "levelInit":
-			mapname, err := buf.ReadString(nullstr)
-			if err != nil {
-				fmt.Println("Failed to read levelInit message buffer : ", err)
-				return
-			}
-			fmt.Printf("map : %s", mapname)
-			// srv.handleRequest(cmd) // Add mapname info...
-		case "levelShutdown":
-			fmt.Println("Received levelShutdown...")
-			srv.handleRequest(cmd)
-		case "cam":
-			camData := &CamData{}
-			if err := binary.Read(buf, binary.LittleEndian, camData); err != nil {
-				fmt.Println("Failed to parse cam message buffer : ", err)
-				return
-			}
-			srv.handleCamRequest(camData)
-		case "gameEvent":
-			fmt.Println("Received gameEvent data...")
-			ev, err := srv.eventSerializer.Unserialize(buf)
-			if err != nil {
-				fmt.Println("Failed to parse event descriptions... ERR:", err)
-				return
-			}
-			log.Printf("EVENT : %v\n", ev)
-			srv.handleEventRequest(ev)
-		default:
-			fmt.Printf("Unknown message:[%s]\n", cmd)
-			srv.handleRequest(cmd)
+	srv.melody.HandleConnect(func(session *melody.Session) {
+		hs := HLAESession{Session: session}
+		if hs.UUID() == uuid.Nil {
+			hs.SetUUID(uuid.New())
 		}
+		srv.websocketHandleConnect(hs)
 	})
-	srv.melody.HandleConnect(func(s *melody.Session) {
-		srv.sessions = append(srv.sessions, s)
-		fmt.Println("HLAE WebSocket client connected. Current clients:", len(srv.sessions))
-		// s.WriteBinary(commandToByteSlice("echo Hello World from Go!"))
+	srv.melody.HandleDisconnect(func(session *melody.Session) {
+		hs := HLAESession{Session: session}
+		srv.websocketHandleDisconnect(hs)
 	})
-	srv.melody.HandleDisconnect(func(s *melody.Session) {
-		// Remove session from session slice
-		for k, v := range srv.sessions {
-			if v == s {
-				newsession := make([]*melody.Session, len(srv.sessions)-1)
-				newsession = append(srv.sessions[:k], srv.sessions[k+1:]...)
-				srv.sessions = newsession
-				fmt.Println("HLAE WebSocket client disconnected. Current clients : ", len(srv.sessions))
-				return
-			}
-		}
-	})
-
-	gin.SetMode(gin.ReleaseMode)
-	srv.engine = gin.Default()
-	srv.engine.GET(path, func(c *gin.Context) {
-		srv.melody.HandleRequest(c.Writer, c.Request)
+	srv.melody.HandleMessageBinary(func(session *melody.Session, data []byte) {
+		hs := HLAESession{Session: session}
+		srv.websocketHandleMessageBinary(hs, data)
 	})
 
 	return srv, nil
 }
 
-// HLAEServer Main struct
-type HLAEServer struct {
-	host            string
-	path            string
-	melody          *melody.Melody
-	sessions        []*melody.Session
-	engine          *gin.Engine
-	eventSerializer *gameEventUnserializer
-
-	handlers      []func(string)
-	camhandlers   []func(*CamData)
-	eventhandlers []func(*GameEventData)
+func (h *HLAEServer) websocketHandleConnect(s HLAESession) {
+	h.sessions = append(h.sessions, s)
+	h.logger.Info("HLAE WebSocket client connected.",
+		zap.Int("current_sessions_count", len(h.sessions)))
 }
 
-func commandToByteSlice(cmd string) []byte {
-	length := len("exec") + 1 + len(cmd) + 1 // "exec" + (nullstr) + command + (nullstr)
-	command := make([]byte, 0, length)
-	command = append(command, []byte("exec")...)
-	command = append(command, nullstr)
-	command = append(command, []byte(cmd)...)
-	command = append(command, nullstr)
+func (h *HLAEServer) websocketHandleDisconnect(s HLAESession) {
+	// Remove session from session slice
+	for idx, v := range h.sessions {
+		if v.Session == s.Session {
+			newSessions := make([]HLAESession, len(h.sessions)-1)
+			newSessions = append(h.sessions[:idx], h.sessions[idx+1:]...)
+			h.sessions = newSessions
+			h.logger.Info("HLAE Websocket client disconnected.",
+				zap.Int("current_sessions_count", len(h.sessions)))
+			return
+		}
+	}
+}
 
-	return command
+func (h *HLAEServer) websocketHandleMessageBinary(s HLAESession, data []byte) {
+	buf := bytes.NewBuffer(data)
+	cmd, err := buf.ReadString(nullStr)
+	if err != nil {
+		if err == io.EOF {
+			h.logger.Debug("EOF", s.UUIDAsLogField())
+		} else {
+			h.logger.Error("failed to read string from buffer",
+				s.UUIDAsLogField(), zap.Error(err))
+		}
+		return
+	}
+	cmd = strings.ReplaceAll(cmd, string(nullStr), "")
+	h.logger.Debug("received command",
+		s.UUIDAsLogField(), zap.String("cmd", cmd))
+	switch cmd {
+	case "hello":
+		h.logger.Info("HLAE Client connection established.",
+			s.UUIDAsLogField())
+		var version uint32
+		if err := binary.Read(buf, binary.LittleEndian, &version); err != nil {
+			h.logger.Error("failed to read version message buffer",
+				s.UUIDAsLogField(), zap.Error(err))
+			return
+		}
+		h.logger.Info("Got version message",
+			s.UUIDAsLogField(), zap.Uint32("version", version))
+		if version != mirvPglVersion {
+			h.logger.Error("Client version is mismatched. exited",
+				s.UUIDAsLogField(),
+				zap.Uint32("expected_version", mirvPglVersion))
+			return
+		}
+
+		h.TransBegin()
+		s.WriteBinary(commandToByteSlice("mirv_pgl events enrich clientTime 1"))
+		for eventName, v := range enrichments {
+			for enrichName, e := range v {
+				for _, er := range e.GetEnrichment() {
+					cmd := fmt.Sprintf(`mirv_pgl events enrich eventProperty "%s" "%s" "%s"`,
+						er, eventName, enrichName)
+					s.WriteBinary(commandToByteSlice(cmd))
+				}
+			}
+		}
+		s.WriteBinary(commandToByteSlice("mirv_pgl events enabled 1"))
+		s.WriteBinary(commandToByteSlice("mirv_pgl events useCache 1"))
+		h.TransEnd()
+
+		h.handleRequest(cmd)
+	case "dataStop":
+		h.logger.Info("HLAE Client stopped sending data.", s.UUIDAsLogField())
+		h.handleRequest(cmd)
+	case "dataStart":
+		h.logger.Info("HLAE Client started sending data.", s.UUIDAsLogField())
+		h.handleRequest(cmd)
+	case "levelInit":
+		mapName, err := buf.ReadString(nullStr)
+		if err != nil {
+			h.logger.Error("failed to read levelInit message buffer",
+				s.UUIDAsLogField(), zap.Error(err))
+			return
+		}
+		h.logger.Info("level init",
+			s.UUIDAsLogField(), zap.String("map", mapName))
+		h.handleLevelInitRequest(mapName)
+	case "levelShutdown":
+		h.logger.Info("received levelShutdown", s.UUIDAsLogField())
+		h.handleRequest(cmd)
+	case "cam":
+		camData := &CamData{}
+		if err := binary.Read(buf, binary.LittleEndian, camData); err != nil {
+			h.logger.Info("failed to parse cam message buffer",
+				s.UUIDAsLogField(), zap.Error(err))
+			return
+		}
+		h.handleCamRequest(camData)
+	case "gameEvent":
+		ev, err := h.eventSerializer.Unserialize(buf)
+		if err != nil {
+			h.logger.Error("failed to parse event desc",
+				s.UUIDAsLogField(), zap.Error(err))
+			return
+		}
+		h.logger.Debug("EVENT", s.UUIDAsLogField(), zap.Any("event", ev))
+		h.handleEventRequest(ev)
+	default:
+		h.logger.Warn("unknown message", s.UUIDAsLogField(), zap.String("cmd", cmd))
+		h.handleRequest(cmd)
+	}
+}
+
+// ServeHTTP implements http.Handler interfaces
+func (h *HLAEServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if err := h.melody.HandleRequest(w, r); err != nil {
+		h.logger.Error("failed to handle request",
+			zap.String("client", r.RemoteAddr),
+			zap.Error(err))
+	}
 }
 
 // BroadcastRCON broadcast command
@@ -200,77 +209,74 @@ func (h *HLAEServer) SendRCON(k int, cmd string) error {
 		return nil
 	}
 
-	return fmt.Errorf("Out of index slice")
+	return fmt.Errorf("out of index slice")
 }
 
 // RegisterHandler to handle each requests
 func (h *HLAEServer) RegisterHandler(handler func(string)) {
-	if h.handlers == nil {
-		h.handlers = make([]func(string), 0)
-	}
 	h.handlers = append(h.handlers, handler)
-	fmt.Printf("Registered handler. Currently %d handlers are active\n", len(h.handlers))
+	h.logger.Debug("registered handler",
+		zap.Int("active_handlers", len(h.handlers)))
 }
 
 // RegisterCamHandler to handle each requests
 func (h *HLAEServer) RegisterCamHandler(handler func(*CamData)) {
-	if h.camhandlers == nil {
-		h.camhandlers = make([]func(*CamData), 0)
-	}
-	h.camhandlers = append(h.camhandlers, handler)
-	fmt.Printf("Registered Camera handler. Currently %d handlers are active\n", len(h.handlers))
+	h.camHandlers = append(h.camHandlers, handler)
+	h.logger.Debug("registered camera handler",
+		zap.Int("active_handlers", len(h.camHandlers)))
 }
 
 // RegisterEventHandler to handle each requests
 func (h *HLAEServer) RegisterEventHandler(handler func(*GameEventData)) {
-	if h.eventhandlers == nil {
-		h.eventhandlers = make([]func(*GameEventData), 0)
-	}
-	h.eventhandlers = append(h.eventhandlers, handler)
-	fmt.Printf("Registered event handler. Currently %d handlers are active\n", len(h.eventhandlers))
+	h.eventHandlers = append(h.eventHandlers, handler)
+	h.logger.Debug("registered event handler",
+		zap.Int("active_handlers", len(h.eventHandlers)))
+}
+
+func (h *HLAEServer) RegisterLevelInitHandler(handler func(string)) {
+	h.levelInitHandlers = append(h.levelInitHandlers, handler)
+	h.logger.Debug("registered level init handler",
+		zap.Int("active_handlers", len(h.levelInitHandlers)))
 }
 
 func (h *HLAEServer) handleRequest(cmd string) {
-	fmt.Printf("Sending handler request for %d handlers...\n", len(h.handlers))
 	for i := 0; i < len(h.handlers); i++ {
 		go h.handlers[i](cmd)
 	}
 }
 
 func (h *HLAEServer) handleCamRequest(cam *CamData) {
-	fmt.Printf("Sending camera handler request for %d handlers...\n", len(h.handlers))
 	for i := 0; i < len(h.handlers); i++ {
-		go h.camhandlers[i](cam)
+		go h.camHandlers[i](cam)
 	}
 }
 
 func (h *HLAEServer) handleEventRequest(ev *GameEventData) {
-	fmt.Printf("Sending event handler request for %d handlers...\n", len(h.eventhandlers))
-	for i := 0; i < len(h.eventhandlers); i++ {
-		go h.eventhandlers[i](ev)
+	for i := 0; i < len(h.eventHandlers); i++ {
+		go h.eventHandlers[i](ev)
+	}
+}
+
+func (h *HLAEServer) handleLevelInitRequest(mapName string) {
+	for i := 0; i < len(h.levelInitHandlers); i++ {
+		go h.levelInitHandlers[i](mapName)
 	}
 }
 
 // TransBegin Start transaction
 func (h *HLAEServer) TransBegin() error {
-	length := len("transBegin") + 1 // "transBegin" + nullstr
+	length := len("transBegin") + 1 // "transBegin" + nullStr
 	command := make([]byte, 0, length)
 	command = append(command, []byte("transBegin")...)
-	command = append(command, nullstr)
+	command = append(command, nullStr)
 	return h.melody.BroadcastBinary(command)
 }
 
 // TransEnd End transaction
 func (h *HLAEServer) TransEnd() error {
-	length := len("transEnd") + 1 // "transEnd" + nullstr
+	length := len("transEnd") + 1 // "transEnd" + nullStr
 	command := make([]byte, 0, length)
 	command = append(command, []byte("transEnd")...)
-	command = append(command, nullstr)
+	command = append(command, nullStr)
 	return h.melody.BroadcastBinary(command)
-}
-
-// Start listening
-func (h *HLAEServer) Start() error {
-	// fmt.Printf("Listening on %s%s\n", h.host, h.path)
-	return h.engine.Run(h.host)
 }

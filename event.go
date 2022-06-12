@@ -10,8 +10,7 @@ import (
 )
 
 const (
-	_ int32 = iota
-	KEYTYPE_STRING
+	KEYTYPE_STRING int32 = iota + 1
 	KEYTYPE_FLOAT32
 	KEYTYPE_INT32
 	KEYTYPE_INT16
@@ -20,6 +19,38 @@ const (
 	KEYTYPE_BIGUINT64
 	KEYTYPE_UNKNOWN
 )
+
+// CamData Camera data
+type CamData struct {
+	Time float32
+	XPos float32
+	YPos float32
+	ZPos float32
+	XRot float32
+	YRot float32
+	ZRot float32
+	Fov  float32
+}
+
+// Coordinates include float32 X/Y/Z Pos coordinates.
+type Coordinates struct {
+	X float32
+	Y float32
+	Z float32
+}
+
+// GameEventData Game event keys and time
+type GameEventData struct {
+	Name       string
+	ClientTime float32
+	Keys       map[string]string // Even value is float32 or int etc. convert to string
+}
+
+// EventKey key-value struct with dynamic typing
+type EventKey struct {
+	Name string
+	Type int32
+}
 
 type gameEventUnserializer struct {
 	Enrichments Enrichments
@@ -62,14 +93,7 @@ func (g *gameEventUnserializer) Unserialize(r io.Reader) (*GameEventData, error)
 	return ev.Unserialize(buf)
 }
 
-// Cordinates include float32 X/Y/Z Pos cordinates.
-type Cordinates struct {
-	X float32
-	Y float32
-	Z float32
-}
-
-// GameEventDescription include Event ID,Name, Keys etc.
+// GameEventDescription include Event ID, Name, Keys etc.
 type GameEventDescription struct {
 	EventID     int32
 	EventName   string
@@ -88,7 +112,7 @@ func newGameEventDescription(r *bufio.Reader) (*GameEventDescription, error) {
 		return nil, fmt.Errorf("Failed to parse Event ID : %v", err)
 	}
 
-	eventName, err := r.ReadString(nullstr)
+	eventName, err := r.ReadString(nullStr)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to parse Event Name : %v", err)
 	}
@@ -105,7 +129,7 @@ func newGameEventDescription(r *bufio.Reader) (*GameEventDescription, error) {
 		if ok == 0 {
 			break
 		}
-		keyName, err := r.ReadString(nullstr)
+		keyName, err := r.ReadString(nullStr)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to read key name:%v", err)
 		}
@@ -119,13 +143,6 @@ func newGameEventDescription(r *bufio.Reader) (*GameEventDescription, error) {
 		})
 	}
 	return d, nil
-}
-
-// GameEventData Game event keys and time
-type GameEventData struct {
-	Name       string
-	ClientTime float32
-	Keys       map[string]string // Even value is float32 or int etc. convert to string
 }
 
 // Unserialize parse EventDescription
@@ -146,7 +163,7 @@ func (e *GameEventDescription) Unserialize(r io.Reader) (*GameEventData, error) 
 		var keyvalue string
 		switch v.Type {
 		case KEYTYPE_STRING:
-			val, err := buf.ReadString(nullstr)
+			val, err := buf.ReadString(nullStr)
 			if err != nil {
 				return nil, fmt.Errorf("Failed to read CString value:%v", err)
 			}
@@ -197,16 +214,10 @@ func (e *GameEventDescription) Unserialize(r io.Reader) (*GameEventData, error) 
 			var f *big.Int
 			keyvalue = f.Or(lo, hi.Lsh(hi, 32)).String()
 		default:
-			return nil, fmt.Errorf("Unknown Event key")
+			return nil, fmt.Errorf("unknown Event key")
 		}
 		d.Keys[keyname] = keyvalue
 		// Check enrichments keyName check...
 	}
 	return d, nil
-}
-
-// EventKey key-value struct with dynamic typing
-type EventKey struct {
-	Name string
-	Type int32
 }

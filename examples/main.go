@@ -2,19 +2,29 @@ package main
 
 import (
 	"fmt"
-
-	mirvpgl "github.com/FlowingSPDG/HLAE-Server-GO"
 	"github.com/c-bata/go-prompt"
+	mirvpgl "github.com/fython/hlae-server-kit-go"
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+var (
+	srv    *mirvpgl.HLAEServer
+	logger *zap.Logger
 )
 
 // ExampleHandler for HLAE Server
 func ExampleHandler(cmd string) {
 	fmt.Printf("Received %s\n", cmd)
+	if cmd == "hello" {
+		srv.BroadcastRCON("echo Hello from hlae-server-kit-go")
+	}
 }
 
 // ExampleCamHandler for cam datas
 func ExampleCamHandler(cam *mirvpgl.CamData) {
-	fmt.Printf("Received cam data %v\n", cam)
+	// fmt.Printf("Received cam data %v\n", cam)
 }
 
 // ExampleEventHandler for cam datas
@@ -27,23 +37,43 @@ func completer(in prompt.Document) []prompt.Suggest {
 	return prompt.FilterHasPrefix(s, in.GetWordBeforeCursor(), true)
 }
 
+func newLogger() *zap.Logger {
+	cfg := zap.NewProductionConfig()
+	cfg.Level.SetLevel(zap.DebugLevel)
+	cfg.Encoding = "console"
+	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	cfg.EncoderConfig.EncodeDuration = zapcore.StringDurationEncoder
+	logger, _ := cfg.Build()
+	return logger
+}
+
 func main() {
-	hlaeserver, err := mirvpgl.New(":65535", "/mirv")
+	var err error
+	logger = newLogger()
+	srv, err = mirvpgl.New(mirvpgl.HLAEServerArguments{
+		Logger: logger,
+	})
 	if err != nil {
 		panic(err)
 	}
-	hlaeserver.RegisterHandler(ExampleHandler)
-	hlaeserver.RegisterCamHandler(ExampleCamHandler)
-	hlaeserver.RegisterEventHandler(ExampleEventHandler)
+	srv.RegisterHandler(ExampleHandler)
+	srv.RegisterCamHandler(ExampleCamHandler)
+	srv.RegisterEventHandler(ExampleEventHandler)
+
+	gin.SetMode(gin.ReleaseMode)
+	engine := gin.Default()
+	engine.GET("/", func(c *gin.Context) {
+		srv.ServeHTTP(c.Writer, c.Request)
+	})
 	go func() {
-		err := hlaeserver.Start()
+		err := engine.Run(":65535")
 		if err != nil {
 			panic(err)
 		}
 	}()
 
 	// NOTE : enclose ws URL with double quotes...
-	// mirv_pgl url "ws://localhost:65535/mirv"
+	// mirv_pgl url "ws://localhost:65535/"
 	// mirv_pgl start
 	// mirv_pgl datastart
 	for {
@@ -51,6 +81,6 @@ func main() {
 		if cmd == "exit" {
 			break
 		}
-		hlaeserver.BroadcastRCON(cmd)
+		srv.BroadcastRCON(cmd)
 	}
 }
