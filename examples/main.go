@@ -15,7 +15,7 @@ var (
 )
 
 // ExampleHandler for HLAE Server
-func ExampleHandler(cmd string) {
+func ExampleHandler(cmd mirvpgl.HLAEServerCommand) {
 	fmt.Printf("Received %s\n", cmd)
 	if cmd == "hello" {
 		srv.BroadcastRCON("echo Hello from hlae-server-kit-go")

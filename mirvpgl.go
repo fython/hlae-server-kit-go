@@ -28,7 +28,7 @@ type HLAEServer struct {
 	sessions        []HLAESession
 	eventSerializer *gameEventUnserializer
 
-	handlers          []func(string)
+	handlers          []func(HLAEServerCommand)
 	camHandlers       []func(*CamData)
 	eventHandlers     []func(*GameEventData)
 	levelInitHandlers []func(string)
@@ -91,7 +91,7 @@ func (h *HLAEServer) websocketHandleDisconnect(s HLAESession) {
 
 func (h *HLAEServer) websocketHandleMessageBinary(s HLAESession, data []byte) {
 	buf := bytes.NewBuffer(data)
-	cmd, err := buf.ReadString(nullStr)
+	cmdStr, err := buf.ReadString(nullStr)
 	if err != nil {
 		if err == io.EOF {
 			h.logger.Debug("EOF", s.UUIDAsLogField())
@@ -101,11 +101,11 @@ func (h *HLAEServer) websocketHandleMessageBinary(s HLAESession, data []byte) {
 		}
 		return
 	}
-	cmd = strings.ReplaceAll(cmd, string(nullStr), "")
+	cmd := HLAEServerCommand(strings.ReplaceAll(cmdStr, string(nullStr), ""))
 	h.logger.Debug("received command",
-		s.UUIDAsLogField(), zap.String("cmd", cmd))
+		s.UUIDAsLogField(), zap.String("cmd", cmdStr))
 	switch cmd {
-	case "hello":
+	case ServerCommandHello:
 		h.logger.Info("HLAE Client connection established.",
 			s.UUIDAsLogField())
 		var version uint32
@@ -139,13 +139,13 @@ func (h *HLAEServer) websocketHandleMessageBinary(s HLAESession, data []byte) {
 		h.TransEnd()
 
 		h.handleRequest(cmd)
-	case "dataStop":
+	case ServerCommandDataStop:
 		h.logger.Info("HLAE Client stopped sending data.", s.UUIDAsLogField())
 		h.handleRequest(cmd)
-	case "dataStart":
+	case ServerCommandDataStart:
 		h.logger.Info("HLAE Client started sending data.", s.UUIDAsLogField())
 		h.handleRequest(cmd)
-	case "levelInit":
+	case ServerCommandLevelInit:
 		mapName, err := buf.ReadString(nullStr)
 		if err != nil {
 			h.logger.Error("failed to read levelInit message buffer",
@@ -155,10 +155,10 @@ func (h *HLAEServer) websocketHandleMessageBinary(s HLAESession, data []byte) {
 		h.logger.Info("level init",
 			s.UUIDAsLogField(), zap.String("map", mapName))
 		h.handleLevelInitRequest(mapName)
-	case "levelShutdown":
+	case ServerCommandLevelShutdown:
 		h.logger.Info("received levelShutdown", s.UUIDAsLogField())
 		h.handleRequest(cmd)
-	case "cam":
+	case ServerCommandCam:
 		camData := &CamData{}
 		if err := binary.Read(buf, binary.LittleEndian, camData); err != nil {
 			h.logger.Info("failed to parse cam message buffer",
@@ -166,7 +166,7 @@ func (h *HLAEServer) websocketHandleMessageBinary(s HLAESession, data []byte) {
 			return
 		}
 		h.handleCamRequest(camData)
-	case "gameEvent":
+	case ServerCommandGameEvent:
 		ev, err := h.eventSerializer.Unserialize(buf)
 		if err != nil {
 			h.logger.Error("failed to parse event desc",
@@ -176,7 +176,7 @@ func (h *HLAEServer) websocketHandleMessageBinary(s HLAESession, data []byte) {
 		h.logger.Debug("EVENT", s.UUIDAsLogField(), zap.Any("event", ev))
 		h.handleEventRequest(ev)
 	default:
-		h.logger.Warn("unknown message", s.UUIDAsLogField(), zap.String("cmd", cmd))
+		h.logger.Warn("unknown message", s.UUIDAsLogField(), zap.String("cmd", cmdStr))
 		h.handleRequest(cmd)
 	}
 }
@@ -213,7 +213,7 @@ func (h *HLAEServer) SendRCON(k int, cmd string) error {
 }
 
 // RegisterHandler to handle each requests
-func (h *HLAEServer) RegisterHandler(handler func(string)) {
+func (h *HLAEServer) RegisterHandler(handler func(HLAEServerCommand)) {
 	h.handlers = append(h.handlers, handler)
 	h.logger.Debug("registered handler",
 		zap.Int("active_handlers", len(h.handlers)))
@@ -239,7 +239,7 @@ func (h *HLAEServer) RegisterLevelInitHandler(handler func(string)) {
 		zap.Int("active_handlers", len(h.levelInitHandlers)))
 }
 
-func (h *HLAEServer) handleRequest(cmd string) {
+func (h *HLAEServer) handleRequest(cmd HLAEServerCommand) {
 	for i := 0; i < len(h.handlers); i++ {
 		go h.handlers[i](cmd)
 	}
